@@ -13,10 +13,14 @@ mati = MatiAI()
 # -----------------------------
 # Redis connection
 # -----------------------------
-# Local development:
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "localhost"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
+
+REDIS_URL = os.getenv("REDIS_URL")
+
+if not REDIS_URL:
+    raise RuntimeError("REDIS_URL is not set")
+
+redis_client = redis.from_url(
+    REDIS_URL,
     decode_responses=True
 )
 
