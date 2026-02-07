@@ -78,3 +78,4 @@ slowapi==0.1.9
 # CORS
 fastapi-cors==0.0.6
 redis
+groq
