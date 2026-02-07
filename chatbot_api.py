@@ -1,32 +1,18 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import requests
+import requests, json, os
 import redis
-import json
-import os
 
 from mati_ai_engine import MatiAI, adapt_chart_if_needed
 
 app = FastAPI()
 mati = MatiAI()
 
-# -----------------------------
-# Redis connection
-# -----------------------------
-
-REDIS_URL = os.getenv("REDIS_URL")
-
-if not REDIS_URL:
-    raise RuntimeError("REDIS_URL is not set")
-
+# Redis
 redis_client = redis.from_url(
-    REDIS_URL,
+    os.getenv("REDIS_URL"),
     decode_responses=True
 )
-
-# -----------------------------
-# Request schemas
-# -----------------------------
 
 class BirthInput(BaseModel):
     name: str
@@ -43,54 +29,46 @@ class ChatRequest(BaseModel):
     question: str
 
 
-# -----------------------------
-# API endpoint
-# -----------------------------
-
 @app.post("/chat")
 def chat_with_mati(data: ChatRequest):
-    session_id = data.session_id
-    redis_key = f"mati:chart:{session_id}"
+    session_key = f"chart:{data.session_id}"
 
-    # 1️⃣ Try to get chart from Redis
-    cached_chart = redis_client.get(redis_key)
+    # 1️⃣ Try Redis first
+    cached_chart = redis_client.get(session_key)
 
     if cached_chart:
         chart_data = json.loads(cached_chart)
     else:
-        # 2️⃣ Call Birth Chart API
+        # 2️⃣ Generate chart ONCE
         try:
             resp = requests.post(
                 "https://astro-nexus-backend-9u1s.onrender.com/api/v1/chart",
                 json=data.birth_input.dict(),
                 timeout=120
             )
+
+            if resp.status_code == 429:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Birth chart service rate-limited. Please retry after a minute."
+                )
+
             resp.raise_for_status()
+
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        chart_api_response = resp.json()
+        adapted_chart = adapt_chart_if_needed(resp.json())
 
-        # 3️⃣ Adapt chart to Mati format
-        chart_data = adapt_chart_if_needed(chart_api_response)
+        # 3️⃣ Cache permanently (or long TTL)
+        redis_client.set(session_key, json.dumps(adapted_chart), ex=86400)
 
-        # 4️⃣ Store chart in Redis (TTL = 24 hours)
-        redis_client.setex(
-            redis_key,
-            86400,  # 24 hours
-            json.dumps(chart_data)
-        )
+        chart_data = adapted_chart
 
-    # 5️⃣ Answer question using stored chart
+    # 4️⃣ Answer question
     answer = mati.answer_life_question(
         question=data.question,
         chart_data=chart_data
     )
 
-    return {
-        "answer": answer
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("chatbot_api:app", host="0.0.0.0", port=8000)
+    return {"answer": answer}
